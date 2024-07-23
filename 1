@@ -1,0 +1,174 @@
+# Drone gps ile 7 metre kalkış yapar 5 sn stabilize olduktan sonra gps bağlantısı kesilir ve görüntü işleme kodları ile kırmızı kutunun merkezini hesaplayıp kendini ona göre hizalamaya çalışır.
+import time  
+from pymavlink import mavutil
+import cv2
+import numpy as np
+
+# Pixhawk'a bağlantı kurma
+def connect_to_pixhawk():
+    master = mavutil.mavlink_connection('/dev/ttyAMA0', baud=57600)
+    master.wait_heartbeat()
+    print("Pixhawk'a bağlanıldı")
+    return master
+
+# Arming moduna hazırlık
+def ready_arm_mode(master):
+    print("Arming kontrolleri devre dışı bırakılıyor...")
+    set_param(master, 'ARMING_CHECK', 0)
+    set_param(master, 'DISARM_DELAY', 127)
+
+# Arming moduna geçiş
+def go_arm_mode(master):
+    print("İHA arming moduna geçiriliyor...")
+    master.arducopter_arm()
+    master.motors_armed_wait()
+    print("İHA arming modunda")
+
+# Uçuş modunu değiştirme
+def set_mode(master, mode):
+    mode_id = master.mode_mapping()[mode]
+    master.set_mode(mode_id)
+    ack = False
+    while not ack:
+        ack_msg = master.recv_match(type='COMMAND_ACK', blocking=True)
+        ack_msg = ack_msg.to_dict()
+        if ack_msg['command'] == mavutil.mavlink.MAV_CMD_DO_SET_MODE:
+            ack = True
+    print(f"Uçuş modu {mode} olarak değiştirildi")
+
+# GPS üzerinden kalkış yapma
+def takeoff(master, target_altitude):
+    print(f"{target_altitude} metreye kalkış yapılıyor")
+    master.mav.command_long_send(
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
+        0, 0, 0, 0, 0, 0, target_altitude
+    )
+    while True:
+        altitude = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True).relative_alt / 1000.0
+        print(f"Altitude: {altitude} meters")
+        if altitude >= target_altitude * 0.95:
+            print("Reached target altitude")
+            break
+        time.sleep(1)
+
+# İleriye doğru hareket etme (velocity control)
+def move_towards_target(master, vx, vy, vz):
+    print(f"Moving in direction: vx={vx}, vy={vy}, vz={vz}")
+    master.mav.set_position_target_local_ned_send(
+        0,  # Timestamp (not used)
+        master.target_system, master.target_component,
+        mavutil.mavlink.MAV_FRAME_BODY_NED,
+        int(0b110111000111),  # Control velocities
+        0, 0, 0,  # Positions (not used)
+        vx, vy, vz,  # Velocities in m/s
+        0, 0, 0,  # Accelerations (not used)
+        0, 0  # Yaw and yaw rate (not used)
+    )
+
+# İniş yapma
+def land(master):
+    print("İHA iniş yapıyor...")
+    master.mav.command_long_send(
+        master.target_system,
+        master.target_component,
+        mavutil.mavlink.MAV_CMD_NAV_LAND,
+        0,
+        0, 0, 0, 0, 0, 0, 0
+    )
+    while True:
+        ack_msg = master.recv_match(type='COMMAND_ACK', blocking=True)
+        ack_msg = ack_msg.to_dict()
+        if ack_msg['command'] == mavutil.mavlink.MAV_CMD_NAV_LAND and ack_msg['result'] == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+            break
+    print("Başarıyla inildi")
+
+# Parametre ayarlama
+def set_param(master, param_id, param_value):
+    print(f"{param_id} parametresi {param_value} olarak ayarlanıyor")
+    master.mav.param_set_send(
+        master.target_system,
+        master.target_component,
+        param_id.encode('utf-8'),
+        param_value,
+        mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+    )
+    time.sleep(1)
+
+    while True:
+        param = master.recv_match(type='PARAM_VALUE', blocking=True)
+        if param.param_id.strip() == param_id:
+            if param.param_value == param_value:
+                print(f"{param_id} parametresi başarıyla {param_value} olarak ayarlandı")
+            else:
+                print(f"{param_id} parametresi {param_value} olarak ayarlanamadı")
+                raise Exception(f"{param_id} parametresi ayarlanamadı")
+            break
+
+# Görüntü işleme kodları
+def process_frame(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lower_red = np.array([0, 100, 100])
+    upper_red = np.array([10, 255, 255])
+    mask1 = cv2.inRange(hsv, lower_red, upper_red)
+    lower_red = np.array([160, 100, 100])
+    upper_red = np.array([179, 255, 255])
+    mask2 = cv2.inRange(hsv, lower_red, upper_red)
+    mask = mask1 | mask2
+    mask = cv2.erode(mask, None, iterations=2)
+    mask = cv2.dilate(mask, None, iterations=2)
+    contours, _ = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return contours
+
+if __name__ == "__main__":
+    try:
+        master = connect_to_pixhawk()
+        ready_arm_mode(master)
+        time.sleep(5)
+        go_arm_mode(master)
+        set_mode(master, 'GUIDED')
+        takeoff(master, 7)  # 7 metreye kalkış
+        time.sleep(5)  # 5 saniye bekle
+        
+        # GPS bağlantısını kes
+        set_param(master, 'EKF_GPS_TYPE', 3)
+        time.sleep(2)
+
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            print("Error: Could not open video stream.")
+            exit()
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            contours = process_frame(frame)
+            if contours:
+                largest_contour = max(contours, key=cv2.contourArea)
+                (x, y, w, h) = cv2.boundingRect(largest_contour)
+                center_x = x + w / 2
+                center_y = y + h / 2
+
+                error_x = center_x - frame.shape[1] / 2
+                error_y = center_y - frame.shape[0] / 2
+
+                vx = -error_y * 0.01  # velocity in x direction
+                vy = error_x * 0.01  # velocity in y direction
+
+                move_towards_target(master, vx, vy, 0)
+
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.circle(frame, (int(center_x), int(center_y)), 5, (0, 255, 0), -1)
+
+            cv2.imshow('Frame', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+        land(master)
+    except KeyboardInterrupt:
+        print("Kullanıcı tarafından kesildi")
+        land(master)
