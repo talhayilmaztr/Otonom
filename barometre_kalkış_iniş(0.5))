@@ -1,0 +1,132 @@
+import time
+from pymavlink import mavutil
+
+# Pixhawk'a bağlantı kurma
+def connect_to_pixhawk():
+    master = mavutil.mavlink_connection('/dev/ttyAMA0', baud=57600)
+    master.wait_heartbeat()
+    print("Pixhawk'a bağlanıldı")
+    return master
+
+# Arming moduna hazırlık
+def ready_arm_mode(master):
+    print("Arming kontrolleri devre dışı bırakılıyor...")
+    set_param(master, 'ARMING_CHECK', 0)
+    set_param(master, 'DISARM_DELAY', 127)
+
+# Arming moduna geçiş
+def go_arm_mode(master):
+    print("İHA arming moduna geçiriliyor...")
+    master.arducopter_arm()
+    master.motors_armed_wait()
+    print("İHA arming modunda")
+
+# Uçuş modunu değiştirme
+def set_mode(master, mode):
+    mode_id = master.mode_mapping()[mode]
+    master.set_mode(mode_id)
+    ack = False
+    while not ack:
+        ack_msg = master.recv_match(type='COMMAND_ACK', blocking=True)
+        ack_msg = ack_msg.to_dict()
+        if ack_msg['command'] == mavutil.mavlink.MAV_CMD_DO_SET_MODE:
+            ack = True
+    print(f"Uçuş modu {mode} olarak değiştirildi")
+
+# Kalkış yapma (barometre ile)
+def takeoff(master, target_altitude):
+    print(f"{target_altitude} metreye kalkış yapılıyor")
+    initial_altitude = get_altitude(master)
+    while True:
+        current_altitude = get_altitude(master)
+        if current_altitude - initial_altitude >= target_altitude:
+            print(f"Hedef irtifa {target_altitude} metreye ulaşıldı")
+            break
+        master.mav.set_position_target_local_ned_send(
+            0, master.target_system, master.target_component,
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            int(0b110111000111),  # Velocity control
+            0, 0, 0,  # Position (not used)
+            0, 0, -1,  # Velocity (1 m/s upwards)
+            0, 0, 0,  # Acceleration (not used)
+            0, 0  # Yaw (not used)
+        )
+        time.sleep(0.1)
+    master.mav.set_position_target_local_ned_send(
+        0, master.target_system, master.target_component,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        int(0b110111000111),  # Velocity control
+        0, 0, 0,  # Position (not used)
+        0, 0, 0,  # Stop velocity
+        0, 0, 0,  # Acceleration (not used)
+        0, 0  # Yaw (not used)
+    )
+
+# İniş yapma (barometre ile)
+def land(master):
+    print("İHA iniş yapıyor...")
+    while True:
+        current_altitude = get_altitude(master)
+        if current_altitude <= 0.5:  # 0.5 metreye kadar in
+            print("Başarıyla inildi")
+            break
+        master.mav.set_position_target_local_ned_send(
+            0, master.target_system, master.target_component,
+            mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+            int(0b110111000111),  # Velocity control
+            0, 0, 0,  # Position (not used)
+            0, 0, 0.5,  # Velocity (0.5 m/s downwards)
+            0, 0, 0,  # Acceleration (not used)
+            0, 0  # Yaw (not used)
+        )
+        time.sleep(0.1)
+    master.mav.set_position_target_local_ned_send(
+        0, master.target_system, master.target_component,
+        mavutil.mavlink.MAV_FRAME_LOCAL_NED,
+        int(0b110111000111),  # Velocity control
+        0, 0, 0,  # Position (not used)
+        0, 0, 0,  # Stop velocity
+        0, 0, 0,  # Acceleration (not used)
+        0, 0  # Yaw (not used)
+    )
+
+# Parametre ayarlama
+def set_param(master, param_id, param_value):
+    print(f"{param_id} parametresi {param_value} olarak ayarlanıyor")
+    master.mav.param_set_send(
+        master.target_system,
+        master.target_component,
+        param_id.encode('utf-8'),
+        param_value,
+        mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+    )
+    time.sleep(1)
+
+    while True:
+        param = master.recv_match(type='PARAM_VALUE', blocking=True)
+        if param.param_id.strip() == param_id:
+            if param.param_value == param_value:
+                print(f"{param_id} parametresi başarıyla {param_value} olarak ayarlandı")
+            else:
+                print(f"{param_id} parametresi {param_value} olarak ayarlanamadı")
+                raise Exception(f"{param_id} parametresi ayarlanamadı")
+            break
+
+# Barometre verilerini al
+def get_altitude(master):
+    altitude_msg = master.recv_match(type='GLOBAL_POSITION_INT', blocking=True)
+    altitude = altitude_msg.relative_alt / 1000.0  # metre cinsinden irtifa
+    return altitude
+
+if __name__ == "__main__":
+    try:
+        master = connect_to_pixhawk()
+        ready_arm_mode(master)
+        time.sleep(5)
+        go_arm_mode(master)
+        set_mode(master, 'GUIDED')
+        takeoff(master, 5)  # 5 metreye kalkış
+        time.sleep(10)  # Hedef irtifada 10 saniye bekle
+        land(master)
+    except KeyboardInterrupt:
+        print("Kullanıcı tarafından kesildi")
