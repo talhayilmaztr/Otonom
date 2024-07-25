@@ -18,6 +18,11 @@ def ready_arm_mode(master):
 def go_arm_mode(master):
     print("İHA arming moduna geçiriliyor...")
     master.arducopter_arm()
+    ack = False
+    while not ack:
+        msg = master.recv_match(type='COMMAND_ACK', blocking=True)
+        if msg.command == mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM and msg.result == mavutil.mavlink.MAV_RESULT_ACCEPTED:
+            ack = True
     master.motors_armed_wait()
     print("İHA arming modunda")
 
@@ -29,7 +34,7 @@ def set_mode(master, mode):
     while not ack:
         ack_msg = master.recv_match(type='COMMAND_ACK', blocking=True)
         ack_msg = ack_msg.to_dict()
-        if ack_msg['command'] == mavutil.mavlink.MAV_CMD_DO_SET_MODE:
+        if ack_msg['command'] == mavutil.mavlink.MAV_CMD_DO_SET_MODE and ack_msg['result'] == mavutil.mavlink.MAV_RESULT_ACCEPTED:
             ack = True
     print(f"Uçuş modu {mode} olarak değiştirildi")
 
@@ -86,7 +91,6 @@ def land(master):
         int(0b110111000111),  # Velocity control
         0, 0, 0,  # Position (not used)
         0, 0, 0,  # Stop velocity
-        0, 0, 0,  # Acceleration (not used)
         0, 0  # Yaw (not used)
     )
 
@@ -124,7 +128,7 @@ if __name__ == "__main__":
         ready_arm_mode(master)
         time.sleep(5)
         go_arm_mode(master)
-        set_mode(master, 'GUIDED')
+        set_mode(master, 'ALT_HOLD')  # GUIDED yerine ALT_HOLD modunu kullan
         takeoff(master, 5)  # 5 metreye kalkış
         time.sleep(10)  # Hedef irtifada 10 saniye bekle
         land(master)
