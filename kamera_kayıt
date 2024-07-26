@@ -1,0 +1,37 @@
+import time
+from picamera2 import Picamera2, Preview
+from picamera2.encoders import H264Encoder
+
+# Video kaydını başlatma ve durdurma
+def start_video_recording(camera, file_path):
+    encoder = H264Encoder()
+    camera.start_recording(encoder, file_path)
+    print(f"Video kaydı başlatıldı: {file_path}")
+
+def stop_video_recording(camera):
+    camera.stop_recording()
+    print("Video kaydı durduruldu")
+
+if __name__ == "__main__":
+    try:
+        camera = Picamera2()
+        video_file_path = '/home/bergusi/Desktop/flight_video.h264'
+        
+        # Kamera yapılandırması
+        config = camera.create_video_configuration()
+        camera.configure(config)
+        camera.start_preview(Preview.QTGL)
+        
+        start_video_recording(camera, video_file_path)
+        
+        # Kaydı istediğiniz süre boyunca devam ettirin
+        time.sleep(10)  # 10 saniye boyunca kayıt yapar, süreyi ihtiyaçlarınıza göre ayarlayabilirsiniz
+        
+        stop_video_recording(camera)
+        camera.stop_preview()
+        camera.close()
+    except KeyboardInterrupt:
+        print("Kullanıcı tarafından kesildi")
+        stop_video_recording(camera)
+        camera.stop_preview()
+        camera.close()
